@@ -54,7 +54,7 @@ class HidMouseReport(
 
         private class Placed(val reportId: Int, val field: Field)
 
-        /** Returns null if [descriptor] has no mouse collection with X and Y in one report. */
+        /** Returns null if [descriptor] has no mouse collection with relative X and Y in one report. */
         fun parse(descriptor: ByteArray): HidMouseReport? {
             var global = Global()
             val pushed = ArrayDeque<Global>()
@@ -99,6 +99,7 @@ class HidMouseReport(
                                 val start = offsets[global.reportId] ?: 0
                                 val isData = data and 1 == 0
                                 val isVariable = data and 2 != 0
+                                val isRelative = data and 4 != 0
                                 if (mouseDepth >= 0 && !mouseDone && isData && isVariable) {
                                     for (n in 0 until global.reportCount) {
                                         val u = usage(n)
@@ -106,7 +107,7 @@ class HidMouseReport(
                                         val field = Placed(global.reportId, Field(start + n * global.reportSize, global.reportSize, global.logicalMin < 0))
                                         val button = if (u ushr 16 == BUTTON_PAGE) u and 0xffff else 0
                                         when {
-                                            u == X || u == Y || u == WHEEL -> placed.putIfAbsent(u, field)
+                                            isRelative && (u == X || u == Y || u == WHEEL) -> placed.putIfAbsent(u, field)
                                             button in 1..MAX_BUTTONS -> placed.putIfAbsent(u, field)
                                         }
                                     }

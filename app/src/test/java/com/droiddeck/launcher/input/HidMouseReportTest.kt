@@ -59,6 +59,11 @@ class HidMouseReportTest {
             "05 01 09 02 a1 01 05 01 09 30 09 31 15 81 25 7f 77 ff ff ff 7f 95 02 81 06 c0")))
     }
 
+    @Test fun rejectsAbsoluteCoordinatesAsMouseDeltas() {
+        assertNull(HidMouseReport.parse(bytes(
+            "05 01 09 02 a1 01 05 01 09 30 09 31 15 00 26 ff 7f 75 10 95 02 81 02 c0")))
+    }
+
     @Test fun readsTheBootReport() {
         assertEquals(HidMouseReport.State(0b11, -6, 2, 0), HidMouseReport.BOOT.decode("03 fa 02"))
     }

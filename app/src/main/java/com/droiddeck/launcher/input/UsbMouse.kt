@@ -28,6 +28,7 @@ class UsbMouse(private val context: Context, private val listener: Listener) {
         fun onMove(dx: Int, dy: Int)
         fun onButton(index: Int, down: Boolean)
         fun onWheel(steps: Int)
+        fun onReady()
         fun onChanged()
         /** The mouse stopped responding while read here, so buttons held then never got their releases. */
         fun onLost()
@@ -40,27 +41,38 @@ class UsbMouse(private val context: Context, private val listener: Listener) {
     private val failed = mutableSetOf<String>()
     private var receiverRegistered = false
     @Volatile private var grab: Grab? = null
-    private var lastReader: Thread? = null
 
     val active: Boolean get() = grab != null
+    val ready: Boolean get() = grab?.ready == true
+
+    fun owns(deviceId: Int): Boolean = grab?.let { it.ready && deviceId in it.androidIds } == true
 
     private val receiver = object : BroadcastReceiver() {
+        @Suppress("DEPRECATION")
         override fun onReceive(context: Context, intent: Intent) {
-            val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-            Log.i(TAG, "USB mouse access ${if (granted) "granted" else "denied"}")
-            if (granted) listener.onChanged()
+            val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE) ?: return
+            when (intent.action) {
+                permissionAction -> {
+                    val granted = usb.hasPermission(device)
+                    Log.i(TAG, "USB mouse access ${if (granted) "granted" else "denied"}")
+                    if (granted) listener.onChanged()
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    asked.remove(device.deviceName)
+                    failed.remove(device.deviceName)
+                    if (grab?.deviceName == device.deviceName) {
+                        release()
+                        listener.onLost()
+                    }
+                }
+            }
         }
     }
 
-    /**
-     * Returns whether the mouse is now read here, setting it up on the reader thread; asks for access once per
-     * plugged-in mouse. A mouse that fails setup after being claimed isn't tried again until it is replugged, since
-     * releasing it re-adds Android's mouse, which would start another attempt.
-     */
-    fun grab(): Boolean {
+    fun grab(externalOnly: Boolean = false): Boolean {
         if (grab != null) return true
-        val (device, mouse) = findMouse() ?: return false
-        if (device.deviceName in failed) return false
+        val (device, mouse, androidIds) = findMouse(externalOnly) ?: return false
+        registerReceiver()
         if (!usb.hasPermission(device)) {
             if (asked.add(device.deviceName)) askPermission(device)
             return false
@@ -68,10 +80,9 @@ class UsbMouse(private val context: Context, private val listener: Listener) {
         val endpoint = (0 until mouse.endpointCount).map(mouse::getEndpoint).firstOrNull {
             it.direction == UsbConstants.USB_DIR_IN && it.type == UsbConstants.USB_ENDPOINT_XFER_INT
         } ?: return false
-        grab = Grab(device, mouse, endpoint, lastReader).also {
-            lastReader = it.thread
-            it.thread.start()
-        }
+        val current = Grab(device, mouse, endpoint, androidIds)
+        grab = current
+        Thread({ synchronized(readerLock) { current.run() } }, "usb-mouse").start()
         return true
     }
 
@@ -88,22 +99,36 @@ class UsbMouse(private val context: Context, private val listener: Listener) {
         receiverRegistered = false
     }
 
-    private fun findMouse(): Pair<UsbDevice, UsbInterface>? {
-        val androidMice = InputDevice.getDeviceIds().asList().mapNotNull { InputDevice.getDevice(it) }
-            .filter { !it.isVirtual && it.supportsSource(InputDevice.SOURCE_MOUSE) }
-            .map { it.vendorId to it.productId }.toSet()
-        return usb.deviceList.values.filter { (it.vendorId to it.productId) in androidMice }.firstNotNullOfOrNull { device ->
-            (0 until device.interfaceCount).map(device::getInterface).firstOrNull(::isBootMouse)?.let { device to it }
+    private fun findMouse(externalOnly: Boolean): Triple<UsbDevice, UsbInterface, Set<Int>>? {
+        val devices = InputDevice.getDeviceIds().asList().mapNotNull { InputDevice.getDevice(it) }
+        val mice = devices.filter { device ->
+            if (externalOnly) {
+                MouseBackInput.isExternalMouse(device) && device.keyboardType != InputDevice.KEYBOARD_TYPE_ALPHABETIC &&
+                    devices.none { it.vendorId == device.vendorId && it.productId == device.productId && PadBridge.isFromController(it) }
+            } else !device.isVirtual && device.supportsSource(InputDevice.SOURCE_MOUSE)
+        }.groupBy { it.vendorId to it.productId }
+        val usbDevices = usb.deviceList.values.groupBy { it.vendorId to it.productId }
+        return usbDevices.entries.firstNotNullOfOrNull { (id, candidates) ->
+            val androidIds = mice[id]?.map { it.id }?.toSet() ?: return@firstNotNullOfOrNull null
+            // Android InputDevice has no USB port identifier to distinguish identical receivers.
+            if (externalOnly && candidates.size != 1) return@firstNotNullOfOrNull null
+            candidates.firstNotNullOfOrNull candidate@ { device ->
+                if (device.deviceName in failed) return@candidate null
+                (0 until device.interfaceCount).map(device::getInterface).firstOrNull(::isBootMouse)
+                    ?.let { Triple(device, it, androidIds) }
+            }
         }
     }
 
+    private fun registerReceiver() {
+        if (receiverRegistered) return
+        val filter = IntentFilter(permissionAction).apply { addAction(UsbManager.ACTION_USB_DEVICE_DETACHED) }
+        if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        else context.registerReceiver(receiver, filter)
+        receiverRegistered = true
+    }
+
     private fun askPermission(device: UsbDevice) {
-        if (!receiverRegistered) {
-            val filter = IntentFilter(permissionAction)
-            if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            else context.registerReceiver(receiver, filter)
-            receiverRegistered = true
-        }
         val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
         val intent = PendingIntent.getBroadcast(context, 0, Intent(permissionAction).setPackage(context.packageName), flags)
         runCatching { usb.requestPermission(device, intent) }.onFailure {
@@ -116,49 +141,50 @@ class UsbMouse(private val context: Context, private val listener: Listener) {
         private val device: UsbDevice,
         private val mouse: UsbInterface,
         private val endpoint: UsbEndpoint,
-        private val previous: Thread?,
+        val androidIds: Set<Int>,
     ) {
         @Volatile private var running = true
         private val claimLock = Any()
-        val thread = Thread(::run, "usb-mouse")
+        val deviceName: String get() = device.deviceName
+        var ready = false
 
-        /** Once this returns, the reader either never claims the interface or sees the cancellation after claiming. */
         fun cancel() = synchronized(claimLock) { running = false }
 
-        // The reader owns the connection: closing it while a transfer is pending would free it under the transfer.
-        // A previous reader may still hold the interface, which would make this claim fail.
-        private fun run() {
-            runCatching { previous?.join() }
-            val connection = if (running) usb.openDevice(device) else null
-            if (connection == null) {
-                main.post { ended(markFailed = false) }
-                return
-            }
-            var claimed = false
-            var boot = false
+        // The reader owns the connection so it cannot be closed during a transfer.
+        fun run() {
             try {
-                claimed = synchronized(claimLock) { running && connection.claimInterface(mouse, true) }
-                if (!claimed) {
-                    main.post { ended(markFailed = false) }
-                    return
-                }
                 if (!running) return
-                val format = setUp(connection)
-                if (format == null) {
-                    main.post { ended(markFailed = true) }
-                    return
+                val connection = usb.openDevice(device) ?: return
+                var claimed = false
+                var boot = false
+                try {
+                    claimed = synchronized(claimLock) { running && connection.claimInterface(mouse, true) }
+                    if (!claimed || !running) return
+                    val format = setUp(connection) ?: return
+                    boot = format === HidMouseReport.BOOT
+                    if (!running) return
+                    Log.i(TAG, String.format(java.util.Locale.ROOT, "reading USB mouse %04x:%04x \"%s\" directly (%s)",
+                        device.vendorId, device.productId, device.productName, if (boot) "boot protocol" else "report ${format.reportId}"))
+                    main.post {
+                        if (grab === this) {
+                            ready = true
+                            listener.onReady()
+                        }
+                    }
+                    read(connection, format)
+                } finally {
+                    if (claimed) {
+                        if (boot) runCatching {
+                            connection.controlTransfer(0x21, SET_PROTOCOL, HID_REPORT_PROTOCOL, mouse.id, null, 0, CONTROL_TIMEOUT_MS)
+                        }
+                        runCatching { connection.releaseInterface(mouse) }
+                    }
+                    connection.close()
                 }
-                boot = format === HidMouseReport.BOOT
-                if (!running) return
-                Log.i(TAG, String.format(java.util.Locale.ROOT, "reading USB mouse %04x:%04x \"%s\" directly (%s)",
-                    device.vendorId, device.productId, device.productName, if (boot) "boot protocol" else "report ${format.reportId}"))
-                read(connection, format)
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "reading USB mouse", e)
             } finally {
-                if (claimed) {
-                    if (boot) connection.controlTransfer(0x21, SET_PROTOCOL, HID_REPORT_PROTOCOL, mouse.id, null, 0, CONTROL_TIMEOUT_MS)
-                    connection.releaseInterface(mouse)
-                }
-                connection.close()
+                main.post { ended() }
             }
         }
 
@@ -183,10 +209,7 @@ class UsbMouse(private val context: Context, private val listener: Listener) {
                 val started = SystemClock.uptimeMillis()
                 val length = connection.bulkTransfer(endpoint, report, report.size, READ_TIMEOUT_MS)
                 if (length <= 0) {
-                    if (SystemClock.uptimeMillis() - started < READ_TIMEOUT_MS / 2 && ++failures >= MAX_FAILURES) {
-                        main.post { lost() }
-                        return
-                    }
+                    if (SystemClock.uptimeMillis() - started < READ_TIMEOUT_MS / 2 && ++failures >= MAX_FAILURES) return
                     continue
                 }
                 failures = 0
@@ -197,11 +220,12 @@ class UsbMouse(private val context: Context, private val listener: Listener) {
             }
         }
 
-        private fun ended(markFailed: Boolean) {
+        private fun ended() {
             if (grab !== this) return
-            if (markFailed) failed += device.deviceName
-            Log.i(TAG, "USB mouse \"${device.productName}\" could not be set up")
+            failed += device.deviceName
+            Log.i(TAG, if (ready) "USB mouse stopped responding" else "USB mouse could not be set up")
             grab = null
+            listener.onLost()
         }
 
         private fun deliver(state: HidMouseReport.State, changed: Int) {
@@ -210,17 +234,10 @@ class UsbMouse(private val context: Context, private val listener: Listener) {
             for (i in 0 until BUTTONS) if (changed and (1 shl i) != 0) listener.onButton(i, state.buttons and (1 shl i) != 0)
             if (state.wheel != 0) listener.onWheel(state.wheel)
         }
-
-        private fun lost() {
-            if (grab !== this) return
-            failed += device.deviceName
-            Log.i(TAG, "USB mouse stopped responding")
-            grab = null
-            listener.onLost()
-        }
     }
 
     companion object {
+        private val readerLock = Any()
         private const val TAG = "UsbMouse"
         private const val GET_DESCRIPTOR = 0x06
         private const val SET_PROTOCOL = 0x0b
@@ -243,19 +260,24 @@ class UsbMouse(private val context: Context, private val listener: Listener) {
          */
         fun returnLeftover(context: Context) {
             Thread({
-                runCatching {
-                    val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
-                    for (device in usb.deviceList.values) {
-                        if (!usb.hasPermission(device)) continue
-                        val mouse = (0 until device.interfaceCount).map(device::getInterface).firstOrNull(::isBootMouse) ?: continue
-                        val connection = usb.openDevice(device) ?: continue
-                        if (connection.claimInterface(mouse, false)) {
-                            connection.releaseInterface(mouse)
-                            Log.i(TAG, "returned USB mouse \"${device.productName}\" to Android")
+                synchronized(readerLock) {
+                    runCatching {
+                        val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                        for (device in usb.deviceList.values) {
+                            if (!usb.hasPermission(device)) continue
+                            val mouse = (0 until device.interfaceCount).map(device::getInterface).firstOrNull(::isBootMouse) ?: continue
+                            val connection = usb.openDevice(device) ?: continue
+                            try {
+                                if (connection.claimInterface(mouse, false)) {
+                                    connection.releaseInterface(mouse)
+                                    Log.i(TAG, "returned USB mouse ${device.productName} to Android")
+                                }
+                            } finally {
+                                connection.close()
+                            }
                         }
-                        connection.close()
-                    }
-                }.onFailure { Log.w(TAG, "returning a USB mouse to Android failed", it) }
+                    }.onFailure { Log.w(TAG, "returning a USB mouse to Android failed", it) }
+                }
             }, "usb-mouse-return").start()
         }
     }

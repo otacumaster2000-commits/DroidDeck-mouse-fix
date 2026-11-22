@@ -6,9 +6,11 @@ import android.hardware.display.DisplayManager
 import android.view.Display
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.semantics.SemanticsProperties.StateDescription
 import androidx.compose.ui.test.*
 import com.droiddeck.launcher.input.*
 import com.droiddeck.launcher.R
+import com.droiddeck.launcher.session.SessionPrefs
 import com.droiddeck.launcher.session.SessionState
 import com.droiddeck.launcher.session.SessionService
 import org.junit.Assert.*
@@ -35,6 +37,17 @@ class InputSettingsTest {
         context.getSharedPreferences("input-profiles", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("input-surfaces", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("controller", Context.MODE_PRIVATE).edit().clear().commit()
+    }
+
+    @Test fun externalUsbMouseIsOffUntilEnabledInDeviceSettings() {
+        assertFalse(SessionPrefs.externalUsbMouse(context))
+        compose.setContent { DroidDeckTheme { InputSettingsPage(onBack = {}) } }
+
+        val toggle = compose.onNodeWithTag("setting-external-usb-mouse").performScrollTo()
+        toggle.assert(SemanticsMatcher.expectValue(StateDescription, context.getString(R.string.widgets_off))).performClick()
+        compose.runOnIdle { assertTrue(SessionPrefs.externalUsbMouse(context)) }
+        toggle.assert(SemanticsMatcher.expectValue(StateDescription, context.getString(R.string.widgets_on))).performClick()
+        compose.runOnIdle { assertFalse(SessionPrefs.externalUsbMouse(context)) }
     }
 
     @Test fun commandSymbolsAreSelectableForAnyCustomButton() {

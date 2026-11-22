@@ -101,6 +101,7 @@ private fun InputSettingsContent(onBack: () -> Unit, onChanged: () -> Unit, embe
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val controller = rememberControllerSettings()
+    var externalUsbMouse by remember { mutableStateOf(SessionPrefs.externalUsbMouse(context)) }
     var oscMode by remember { mutableStateOf(SessionPrefs.oscMode(context)) }
     fun update(change: (InputLibrary) -> InputLibrary): Boolean = runCatching { InputLibraries.update(context, change) }
         .onSuccess { library = it; onChanged() }.onFailure { error = it.message ?: context.getString(R.string.input_save_failed) }.isSuccess
@@ -224,6 +225,12 @@ private fun InputSettingsContent(onBack: () -> Unit, onChanged: () -> Unit, embe
                         PadTextButton(onClick = { newProfile(false) }, modifier = Modifier.padding(8.dp)) { Text(stringResource(R.string.input_new_profile)) }
                     }
                     SettingsGroup(stringResource(R.string.input_device_settings)) {
+                        ToggleRow(host, "external-usb-mouse", stringResource(R.string.input_external_usb_mouse),
+                            stringResource(R.string.input_external_usb_mouse_hint), externalUsbMouse) {
+                            externalUsbMouse = it
+                            SessionPrefs.setExternalUsbMouse(context, it)
+                            onChanged()
+                        }
                         ToggleRow(host, "controller-rumble", stringResource(R.string.ctrl_rumble), null, controller.rumble) { ControllerPrefs.setRumble(context, it); onChanged() }
                         ChoiceRow(host, "controller-dead-zone", stringResource(R.string.ctrl_dead_zone), null, ControllerPrefs.deadZones.map { it to stringResource(R.string.ctrl_percent, it) }, controller.deadZone) { ControllerPrefs.setDeadZone(context, it); onChanged() }
                         ToggleRow(host, "controller-joycon-vr", stringResource(R.string.ctrl_joycon_vr), stringResource(R.string.ctrl_joycon_vr_hint), controller.joyConVr) { ControllerPrefs.setJoyConVr(context, it); onChanged() }
