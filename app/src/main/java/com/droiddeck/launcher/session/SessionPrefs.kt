@@ -688,6 +688,12 @@ object SessionPrefs {
         prefs(context).getString("shape", null)
             ?: if (context.packageManager.hasSystemFeature("android.hardware.sensor.hinge_angle")) SHAPE_WIDE else SHAPE_AUTO
 
+    fun externalUsbMouse(context: Context): Boolean = prefs(context).getBoolean("externalUsbMouse", false)
+
+    fun setExternalUsbMouse(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean("externalUsbMouse", enabled).apply()
+    }
+
     fun oscMode(context: Context, steamSession: Boolean = true): String {
         val saved = prefs(context).getString("osc", OSC_AUTO) ?: OSC_AUTO
         return if (!steamSession && saved == OSC_STEAM_QAM) OSC_AUTO else saved

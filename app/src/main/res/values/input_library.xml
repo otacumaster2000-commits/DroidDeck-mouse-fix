@@ -42,6 +42,8 @@
     <string name="input_default_both">Default for Desktop and Game</string>
     <string name="input_default_game">Default for Game mode</string>
     <string name="input_default_desktop">Default for Desktop mode</string>
+    <string name="input_external_usb_mouse">External display USB mouse (experimental)</string>
+    <string name="input_external_usb_mouse_hint">Reads a compatible USB mouse directly while the session is focused and a second display is active. Android may ask for USB access.</string>
     <string name="input_device_settings">Device settings</string>
     <string name="input_profile_controls">Controls</string>
     <string name="input_physical_hint">Buttons, sticks, triggers and extra keys</string>

@@ -9,6 +9,8 @@
     <string name="input_default_both">По умолчанию для рабочего стола и игры</string>
     <string name="input_default_game">По умолчанию для игрового режима</string>
     <string name="input_default_desktop">По умолчанию для режима рабочего стола</string>
+    <string name="input_external_usb_mouse">USB-мышь на внешнем экране (экспериментально)</string>
+    <string name="input_external_usb_mouse_hint">Читает данные совместимой USB-мыши напрямую, пока сессия в фокусе и подключён второй экран. Android может запросить доступ к USB.</string>
     <string name="input_device_settings">Настройки устройства</string>
     <string name="input_profile_controls">Управление</string>
     <string name="input_physical_hint">Кнопки, стики, триггеры и доп. клавиши</string>
